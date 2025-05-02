@@ -87,11 +87,12 @@ def connectionToDB():
 def currentUnixTime():
     return int(datetime.now(pytz.utc).timestamp())
 
+from datetime import timezone, timedelta
+
 def unixToPST(unix_timestamp):
-    utc_time = datetime.utcfromtimestamp(int(unix_timestamp))
-    pst = pytz.timezone("America/Los_Angeles")
-    pst_time = utc_time.replace(tzinfo=pytz.utc).astimezone(pst)
-    return pst_time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    pst = timezone(timedelta(hours=-8))  # Fixed PST
+    dt = datetime.utcfromtimestamp(int(unix_timestamp)).replace(tzinfo=timezone.utc).astimezone(pst)
+    return dt.strftime("%Y-%m-%d %H:%M:%S PST")
 
 def fetchRecords(connection, query, params=None):
     try:
