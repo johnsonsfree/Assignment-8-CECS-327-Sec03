@@ -1,0 +1,298 @@
+
+import json
+import socket
+import sys
+import psycopg2
+from datetime import datetime
+import pytz
+
+# Binary Search Tree Node for Device Metadata
+class DeviceNode:
+    def __init__(self, key, metadata):
+        self.key = key
+        self.metadata = metadata
+        self.left = None
+        self.right = None
+
+class DeviceMetadataBST:
+    def __init__(self):
+        self.root = None
+
+    def insert(self, key, metadata):
+        self.root = self._insert(self.root, key, metadata)
+
+    def _insert(self, node, key, metadata):
+        if node is None:
+            return DeviceNode(key, metadata)
+        if key < node.key:
+            node.left = self._insert(node.left, key, metadata)
+        elif key > node.key:
+            node.right = self._insert(node.right, key, metadata)
+        return node
+
+    def search(self, key):
+        return self._search(self.root, key)
+
+    def _search(self, node, key):
+        if node is None:
+            return None
+        if key == node.key:
+            return node.metadata
+        elif key < node.key:
+            return self._search(node.left, key)
+        else:
+            return self._search(node.right, key)
+
+# Sample Metadata Initialization
+device_tree = DeviceMetadataBST()
+device_tree.insert("refrigerator_1", {
+    'device_id': 'refrigerator_1',
+    'board_name': 'Fridge Board',
+    'timezone': 'America/Los_Angeles',
+    'units': {'moisture': 'RH%', 'current': 'kWh'},
+    'sensors': {
+        'moisture': 'Moisture Meter - Moisture Sensor',
+        'current': 'ACS712 - Ammeter Sensor'
+    }
+})
+device_tree.insert("refrigerator_2", {
+    'device_id': 'refrigerator_2',
+    'board_name': 'board 1 6c8aabc5-3cfe-4996-a04b-24a1c336e495',
+    'timezone': 'America/Los_Angeles',
+    'units': {'moisture': 'RH%', 'current': 'kWh'},
+    'sensors': {
+        'moisture': 'sensor 2 6c8aabc5-3cfe-4996-a04b-24a1c336e495',
+        'current': 'sensor 1 6c8aabc5-3cfe-4996-a04b-24a1c336e495'
+    }
+})
+device_tree.insert("dishwasher", {
+    'device_id': 'dishwasher',
+    'board_name': 'Dishwasher Board',
+    'timezone': 'America/Los_Angeles',
+    'units': {'water': 'gallons', 'current': 'kWh'},
+    'sensors': {
+        'water': 'Water Consumption Sensor',
+        'current': 'ACS712 - Ammeter Sensor Dishwasher'
+    }
+})
+
+connectionLink = "postgresql://neondb_owner:npg_1A8ZEeGuFJya@ep-morning-lake-a6h7yydl-pooler.us-west-2.aws.neon.tech/neondb?sslmode=require"
+
+def connectionToDB():
+    try:
+        return psycopg2.connect(connectionLink)
+    except Exception:
+        return None
+
+def currentUnixTime():
+    return int(datetime.now(pytz.utc).timestamp())
+
+def unixToPST(unix_timestamp):
+    utc_time = datetime.utcfromtimestamp(int(unix_timestamp))
+    pst = pytz.timezone("America/Los_Angeles")
+    pst_time = utc_time.replace(tzinfo=pytz.utc).astimezone(pst)
+    return pst_time.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+def fetchRecords(connection, query, params=None):
+    try:
+        cursor = connection.cursor()
+        cursor.execute(query, params or ())
+        records = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        return records
+    except Exception as e:
+        print(f"Error fetching records: {e}")
+        return []
+
+def convert_moisture_to_rh(moisture_value):
+    return min(max(moisture_value * 10, 0), 100)  # Basic placeholder conversion
+
+def calculateKWH(readings):
+    if not readings:
+        return 0
+    reading_sum = sum(readings)
+    count = len(readings)
+    return ((reading_sum - (2.5 * count)) / 0.185) * 120 / 60 / 1000
+
+def query1(connection):
+    device = device_tree.search("refrigerator_1")
+    if not device:
+        return "Device metadata not found."
+
+    try:
+        now_unix = currentUnixTime()
+        three_hours_ago_unix = now_unix - (3 * 60 * 60)
+        moisture_sensor = device['sensors']['moisture']
+
+        records = fetchRecords(
+            connection,
+            """
+            SELECT payload FROM "Assignment 8_virtual"
+            WHERE payload->>'board_name' = %s
+            AND (payload->>'timestamp')::numeric BETWEEN %s AND %s
+            """,
+            (device['board_name'], three_hours_ago_unix, now_unix)
+        )
+
+        moisture_readings, timestamps = [], []
+        for record in records:
+            if moisture_sensor in record:
+                try:
+                    raw = float(record[moisture_sensor])
+                    moisture_readings.append(convert_moisture_to_rh(raw))
+                except:
+                    continue
+            if 'timestamp' in record:
+                try:
+                    timestamps.append(int(record['timestamp']))
+                except:
+                    continue
+
+        if not moisture_readings:
+            return "No RH data found for refrigerator_1."
+
+        avg_rh = sum(moisture_readings) / len(moisture_readings)
+        min_time = unixToPST(min(timestamps)) if timestamps else "N/A"
+        max_time = unixToPST(max(timestamps)) if timestamps else "N/A"
+
+        return (f"Average RH in kitchen fridge (past 3 hours): {avg_rh:.2f}% RH\n"
+                f"Time period: {min_time} to {max_time}")
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def query2(connection):
+    device = device_tree.search("dishwasher")
+    if not device:
+        return "Device metadata not found."
+
+    try:
+        water_sensor = device['sensors']['water']
+        records = fetchRecords(
+            connection,
+            """
+            SELECT payload FROM "Assignment 8_virtual"
+            WHERE payload->>'board_name' = %s
+            """,
+            (device['board_name'],)
+        )
+
+        water_readings, timestamps = [], []
+        for record in records:
+            if water_sensor in record:
+                try:
+                    water_readings.append(float(record[water_sensor]))
+                except:
+                    continue
+            if 'timestamp' in record:
+                try:
+                    timestamps.append(int(record['timestamp']))
+                except:
+                    continue
+
+        if not water_readings:
+            return "No water consumption data found."
+
+        avg_water = sum(water_readings) / len(water_readings)
+        min_time = unixToPST(min(timestamps)) if timestamps else "N/A"
+        max_time = unixToPST(max(timestamps)) if timestamps else "N/A"
+
+        return (f"Avg. water use in dishwasher: {avg_water:.2f} gallons\n"
+                f"Time period: {min_time} to {max_time}")
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def query3(connection):
+    try:
+        results = {}
+        for device_key in ["refrigerator_1", "refrigerator_2", "dishwasher"]:
+            device = device_tree.search(device_key)
+            if not device:
+                results[device_key] = 0
+                continue
+
+            current_sensor = device['sensors'].get('current')
+            records = fetchRecords(
+                connection,
+                """
+                SELECT payload FROM "Assignment 8_virtual"
+                WHERE payload->>'board_name' = %s
+                """,
+                (device['board_name'],)
+            )
+
+            readings = []
+            for record in records:
+                if current_sensor in record:
+                    try:
+                        readings.append(float(record[current_sensor]))
+                    except:
+                        continue
+
+            results[device_key] = calculateKWH(readings)
+
+        max_device = max(results.items(), key=lambda x: x[1])
+        response = f"{max_device[0].replace('_', ' ').title()} used the most power: {max_device[1]:.2f} kWh\n"
+        for device, kwh in results.items():
+            response += f"{device.replace('_', ' ').title()}: {kwh:.2f} kWh\n"
+
+        return response
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def processQuery(query_number, connection):
+    queries = {
+        "1": query1,
+        "2": query2,
+        "3": query3
+    }
+    return queries.get(query_number, lambda conn: "Invalid query number.")(connection)
+
+def server(host, port):
+    try:
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.bind((host, port))
+        server_socket.listen(5)
+        print(f"Server listening on {host}:{port}...")
+
+        db_connection = connectionToDB()
+        if not db_connection:
+            print("DB connection failed.")
+            return
+
+        print("Connected to DB.")
+
+        while True:
+            client_socket, client_address = server_socket.accept()
+            print(f"Connected to {client_address}")
+
+            try:
+                while True:
+                    data = client_socket.recv(1024)
+                    if not data:
+                        break
+                    query_number = data.decode('utf-8')
+                    print(f"Query received: {query_number}")
+                    response = processQuery(query_number, db_connection)
+                    client_socket.sendall(response.encode('utf-8'))
+
+            except Exception as e:
+                print(f"Client error: {e}")
+            finally:
+                client_socket.close()
+                print(f"Connection closed with {client_address}")
+
+    except Exception as e:
+        print(f"Server error: {e}")
+    finally:
+        if 'db_connection' in locals() and db_connection:
+            db_connection.close()
+        if 'server_socket' in locals():
+            server_socket.close()
+
+if __name__ == "__main__":
+    host = input("Enter the server IP address: ")
+    port = int(input("Enter the port number (e.g., 12345): "))
+    server(host, port)
